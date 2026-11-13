@@ -117,12 +117,14 @@ pub(super) fn namespace(
         if declared.contains(full) {
             continue;
         }
-        if item
-            .block
-            .as_ref()
-            .is_some_and(|b| facts.blocks.contains_key(b))
-            && report.blocks_unknown.contains_key(&key(name))
-        {
+        // The block it places must be carried: a vanilla one or one the mod declared (under the
+        // id by path, under another namespace it owns as `ns:path`).
+        if item.block.as_ref().is_some_and(|b| {
+            !b.starts_with("minecraft:")
+                && !report
+                    .blocks
+                    .contains_key(b.strip_prefix(&format!("{id}:")).unwrap_or(b))
+        }) {
             report
                 .items_unknown
                 .insert(key(name), "its block is left out".into());

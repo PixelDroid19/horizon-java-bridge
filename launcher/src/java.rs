@@ -12,6 +12,7 @@
 
 use crate::{backend, mojang, sources};
 use serde::Serialize;
+use std::ffi::OsStr;
 use std::fs;
 use std::path::{Path, PathBuf};
 
@@ -139,14 +140,11 @@ pub fn runtimes_dir() -> PathBuf {
 
 /// The runtimes in a Mojang `runtime` folder.
 pub fn mojang_runtimes(dir: &Path) -> Vec<Runtime> {
-    horizon_prepare::java::minecraft_runtimes(dir)
+    horizon_platform::prepare::java::minecraft_runtimes(dir)
         .into_iter()
         .filter_map(|home| runtime(home, Source::Mojang))
         .collect()
 }
-
-/// The `java` program in a Java home's `bin`.
-const JAVA_EXE: &str = if cfg!(windows) { "java.exe" } else { "java" };
 
 /// Java homes installed on this computer: JAVA_HOME, the PATH's, then the folders installers use,
 /// each once.
@@ -154,14 +152,7 @@ pub fn installed() -> Vec<Runtime> {
     let var = |name: &str| std::env::var_os(name).filter(|v| !v.is_empty());
     let mut homes: Vec<PathBuf> = var("JAVA_HOME").map(PathBuf::from).into_iter().collect();
     if let Some(path) = var("PATH") {
-        homes.extend(
-            std::env::split_paths(&path)
-                .filter(|dir| dir.file_name().is_some_and(|n| n == "bin"))
-                .map(|dir| dir.join(JAVA_EXE))
-                .filter(|java| java.is_file())
-                .map(horizon_prepare::java::real_path)
-                .filter_map(|java| Some(java.parent()?.parent()?.to_path_buf())),
-        );
+        homes.extend(homes_from_path(&path));
     }
     for parent in parents() {
         for entry in fs::read_dir(parent).into_iter().flatten().flatten() {
@@ -177,12 +168,32 @@ pub fn installed() -> Vec<Runtime> {
     for home in homes {
         // Without Windows' `\\?\` prefix: the home goes to the game in HORIZON_JAVA_HOME, and
         // HotSpot loaded from a verbatim path finds no `lib\modules` ("jimage file name is null").
-        let home = horizon_prepare::java::real_path(home);
+        let home = horizon_platform::prepare::java::real_path(home);
         if !found.iter().any(|r| r.home == home) {
             found.extend(runtime(home, Source::Installed));
         }
     }
     found
+}
+
+/// The Java homes a `PATH` names: each entry that is a `bin` folder holding the `java` program,
+/// taken as the home above it. Windows spells that program `java.exe`, so a plain `java` finds
+/// nothing there and the runtime would be missed.
+fn homes_from_path(path: &OsStr) -> Vec<PathBuf> {
+    std::env::split_paths(path)
+        .filter(|dir| dir.file_name().is_some_and(|n| n == "bin"))
+        .filter_map(|dir| fs::canonicalize(dir.join(java_program())).ok())
+        .filter_map(|java| Some(java.parent()?.parent()?.to_path_buf()))
+        .collect()
+}
+
+/// The program name Java installers put in a home's `bin` on this OS.
+fn java_program() -> &'static str {
+    if cfg!(windows) {
+        "java.exe"
+    } else {
+        "java"
+    }
 }
 
 /// The folders Java installers put homes in, one home per child.

@@ -371,7 +371,7 @@ fn ensure_game_files(tag: &str, say: &dyn Fn(&str)) -> Result<(), String> {
         &[("tag", tag)],
     ));
     let dir = backend::version_dir(tag);
-    if horizon_prepare::artifacts::reuse_imported(&dir, say).unwrap_or(false) && has_game_files(tag)
+    if horizon_platform::prepare::artifacts::reuse_imported(&dir, say).unwrap_or(false) && has_game_files(tag)
     {
         return Ok(());
     }

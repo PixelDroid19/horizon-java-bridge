@@ -60,6 +60,7 @@ pub fn happy_ghast_attachment(index: usize) -> [f64; 3] {
     let [x, y, z] = SEATS[index.min(SEATS.len() - 1)];
     pt(x, y, z)
 }
+/// `Pig.getDefaultDimensions` and other species' age-specific passenger attachments.
 fn base_attachment(v: &Mob) -> [f64; 3] {
     let baby = v.is_baby();
     // Players and mannequins have no `passengerAttachments`: their box top.
@@ -74,6 +75,7 @@ fn base_attachment(v: &Mob) -> [f64; 3] {
         Species::Donkey => up(1.1125),
         Species::Mule => up(1.2125),
         Species::SkeletonHorse | Species::ZombieHorse => up(1.31875),
+        Species::Pig if baby => up(0.5),
         Species::Pig => up(0.86875),
         // `Hoglin.BABY_DIMENSIONS` and `EntityType.HOGLIN`.
         Species::Hoglin if baby => up(0.875),
@@ -184,24 +186,44 @@ pub fn seat(attachment: [f64; 3], rider_offset: f64, at: Vec3, yaw: f32) -> Vec3
 
 /// `Entity.startRiding`: the link it makes, `rider` on `vehicle` as its first
 /// passenger (`addPassenger`).
-pub fn link(mobs: &mut [Mob], rider: u32, vehicle: u32) {
+pub fn link<M: super::MobSlot>(mobs: &mut [M], rider: u32, vehicle: u32) {
     if rider == vehicle {
         return;
     }
-    if let Some(m) = mobs.iter_mut().find(|m| m.id == rider) {
+    if let Some(m) = mobs
+        .iter_mut()
+        .map(super::MobSlot::mob_mut)
+        .find(|m| m.id == rider)
+    {
         super::shulker::on_start_riding(m);
         m.extra.mount = Some(vehicle);
         m.extra.passenger = true;
     }
-    if let Some(m) = mobs.iter_mut().find(|m| m.id == vehicle) {
+    if let Some(m) = mobs
+        .iter_mut()
+        .map(super::MobSlot::mob_mut)
+        .find(|m| m.id == vehicle)
+        && m.extra.rider.is_none()
+    {
         m.extra.rider = Some(rider);
+    }
+}
+/// `canAddPassenger` with `aboard` passengers on `v`: a camel takes another
+/// while it carries at most two (`Camel`: `getPassengers().size() <= 2`, a baby
+/// too), a happy ghast up to four, anything else only when empty (`Entity`).
+pub fn can_add_passenger(v: &Mob, aboard: usize) -> bool {
+    match v.species() {
+        s if super::camel::is_camel(s) => aboard <= 2,
+        Species::HappyGhast => aboard < 4,
+        _ => aboard == 0,
     }
 }
 /// `Piglin.getTopPassenger`: down the chain of first passengers from
 /// `vehicle`, stopping at the `counter`th seat.
-fn top_passenger(mobs: &[Mob], vehicle: u32, counter: i32) -> u32 {
+fn top_passenger<M: super::MobSlot>(mobs: &[M], vehicle: u32, counter: i32) -> u32 {
     let first = mobs
         .iter()
+        .map(super::MobSlot::mob)
         .find(|m| m.id == vehicle)
         .and_then(|m| m.extra.rider);
     match first {
@@ -214,17 +236,22 @@ fn top_passenger(mobs: &[Mob], vehicle: u32, counter: i32) -> u32 {
 /// Not the vehicle it is on already, nor one it carries itself, and only
 /// after its boarding cooldown, onto a vehicle with no passenger
 /// (`canRide`, `canAddPassenger`). Returns whether it boarded.
-pub fn start_riding(mobs: &mut [Mob], rider: u32, vehicle: u32) -> bool {
+pub fn start_riding<M: super::MobSlot>(mobs: &mut [M], rider: u32, vehicle: u32) -> bool {
     // `Shulker.startRiding` puts its attach face back before the ride is
     // decided, so a shulker that is refused still ends up lid up.
-    if let Some(m) = mobs.iter_mut().find(|m| m.id == rider) {
+    if let Some(m) = mobs
+        .iter_mut()
+        .map(super::MobSlot::mob_mut)
+        .find(|m| m.id == rider)
+    {
         super::shulker::on_start_riding(m);
     }
-    let Some(r) = mobs.iter().find(|m| m.id == rider) else {
+    let Some(r) = mobs.iter().map(super::MobSlot::mob).find(|m| m.id == rider) else {
         return false;
     };
     let on_hoglin = mobs
         .iter()
+        .map(super::MobSlot::mob)
         .any(|m| m.id == vehicle && m.species() == Species::Hoglin);
     let vehicle = if r.species() == Species::Piglin && r.is_baby() && on_hoglin {
         top_passenger(mobs, vehicle, MAX_PASSENGERS_ON_ONE_HOGLIN)
@@ -238,15 +265,30 @@ pub fn start_riding(mobs: &mut [Mob], rider: u32, vehicle: u32) -> bool {
     // its vehicle.
     let mut up = Some(vehicle);
     while let Some(v) = up {
-        up = mobs.iter().find(|m| m.id == v).and_then(|m| m.extra.mount);
+        up = mobs
+            .iter()
+            .map(super::MobSlot::mob)
+            .find(|m| m.id == v)
+            .and_then(|m| m.extra.mount);
         if up == Some(rider) {
             return false;
         }
     }
-    let Some(v) = mobs.iter().find(|m| m.id == vehicle) else {
+    let Some(v) = mobs
+        .iter()
+        .map(super::MobSlot::mob)
+        .find(|m| m.id == vehicle)
+    else {
         return false;
     };
-    if r.extra.boarding_cooldown > 0 || v.extra.rider.is_some() || v.rider.is_some() {
+    let count = usize::from(v.rider.is_some())
+        + mobs
+            .iter()
+            .map(super::MobSlot::mob)
+            .filter(|m| m.extra.mount == Some(vehicle))
+            .count()
+            .max(usize::from(v.extra.rider.is_some()));
+    if r.extra.boarding_cooldown > 0 || !can_add_passenger(v, count) {
         return false;
     }
     link(mobs, rider, vehicle);
@@ -395,29 +437,81 @@ pub fn drive(m: &mut Mob, w: &MobWorld) {
 pub fn mob_controlled(m: &Mob, w: &MobWorld) -> bool {
     controller(m, w).is_some()
 }
+/// `Mob.getControllingPassenger` is `rider`: the vehicle's first passenger (a
+/// player aboard sits first, `Entity.addPassenger`), the vehicle not NoAI,
+/// and a rider able to steer (`Entity.canControlVehicle`: not tagged
+/// `non_controlling_rider`). The overrides in `AbstractHorse`, `Pig`,
+/// `Strider`, `HappyGhast` and `AbstractNautilus` fall back to it for a mob.
+pub fn controls_vehicle(
+    vehicle: &Mob,
+    rider: &Mob,
+    player_aboard: bool,
+    non_controlling: bool,
+) -> bool {
+    !vehicle.no_ai && !player_aboard && !non_controlling && vehicle.extra.rider == Some(rider.id)
+}
+/// Whether a mob rider takes its mob vehicle's `yBodyRot` each tick, as
+/// 26.3 does in `AbstractHorse.positionRider` and `Chicken.positionRider`
+/// (any living rider), and in `AbstractSkeleton.rideTick` and
+/// `Drowned.rideTick` for a rider steering a `PathfinderMob`
+/// (`getControlledVehicle`: the vehicle's `getControllingPassenger`, which
+/// `controlling` says). Any other rider's body turns on its own
+/// (`BodyRotationControl`).
+pub fn takes_vehicle_body(vehicle: &Mob, rider: &Mob, controlling: bool) -> bool {
+    let steers = matches!(
+        rider.species(),
+        Species::Skeleton
+            | Species::Stray
+            | Species::Bogged
+            | Species::Parched
+            | Species::WitherSkeleton
+            | Species::Drowned
+    );
+    // Bat, Ghast and Phantom are the Mobs that are not PathfinderMobs (the
+    // ender dragon is no `Mob` here).
+    let pathfinder = !matches!(
+        vehicle.species(),
+        Species::Bat | Species::Ghast | Species::Phantom
+    );
+    super::equine::is_equine(vehicle.species())
+        || vehicle.species() == Species::Chicken
+        || (steers && controlling && pathfinder)
+}
+/// `LivingEntityRenderer.solveBodyRot` for the rider of a living vehicle:
+/// the body drawn from the vehicle's, at most 85 degrees off the head, and
+/// past 50 degrees turned a fifth of the way back toward it.
+pub fn solve_body_rot(head: f32, vehicle_body: f32) -> f32 {
+    let diff = super::living::wrap(head - vehicle_body).clamp(-85.0, 85.0);
+    let mut body = head - diff;
+    if diff.abs() > 50.0 {
+        body += diff * 0.2;
+    }
+    body
+}
 
 /// Tick a passenger with Mob.getNavigation's recursive vehicle redirection.
 /// Navigation is lent, not copied: goal start/stop/path progress all address
 /// the same object the vehicle ticks. The pathfinder sees the vehicle body.
-pub fn tick(
-    mobs: &mut [Mob],
+pub fn tick<M: super::MobSlot>(
+    mobs: &mut [M],
     index: usize,
     w: &MobWorld,
     random: &mut horizon_core::random::LegacyRandom,
     events: &mut Vec<super::MobEvent>,
 ) -> bool {
     let mut owner = index;
-    if !mobs[index].no_ai {
+    if !mobs[index].mob().no_ai {
         for _ in 0..mobs.len() {
             let Some(vehicle) = mobs[owner]
+                .mob()
                 .extra
                 .mount
-                .and_then(|id| mobs.iter().position(|m| m.id == id))
+                .and_then(|id| mobs.iter().position(|m| m.mob().id == id))
             else {
                 break;
             };
             if vehicle == index
-                || controller(&mobs[vehicle], w).is_none_or(|r| r.id != mobs[owner].id)
+                || controller(mobs[vehicle].mob(), w).is_none_or(|r| r.id != mobs[owner].mob().id)
             {
                 break;
             }
@@ -425,14 +519,14 @@ pub fn tick(
         }
     }
     if owner == index {
-        return mobs[index].tick(w, random, events);
+        return mobs[index].mob_mut().tick(w, random, events);
     }
     let (rider, vehicle) = if index < owner {
         let (left, right) = mobs.split_at_mut(owner);
-        (&mut left[index], &mut right[0])
+        (left[index].mob_mut(), right[0].mob_mut())
     } else {
         let (left, right) = mobs.split_at_mut(index);
-        (&mut right[0], &mut left[owner])
+        (right[0].mob_mut(), left[owner].mob_mut())
     };
     let body = vehicle.path_mob();
     std::mem::swap(&mut rider.ai.nav, &mut vehicle.ai.nav);
@@ -504,6 +598,80 @@ mod tests {
         let [x, _, z] = rotated(behind, 90.0);
         assert!((x - 0.0625).abs() < 1e-9 && z.abs() < 1e-9);
     }
+    fn of(id: u32, species: Species) -> Mob {
+        let mut kind = (*crate::mobs::sensor_scan_tests::kind()).clone();
+        kind.species = species;
+        Mob::new(id, std::sync::Arc::new(kind), Vec3::ZERO, 0.0)
+    }
+    /// 26.3 bytecode (`javap -c`): `AbstractHorse.positionRider` and
+    /// `Chicken.positionRider` set every living rider's `yBodyRot` to the
+    /// vehicle's; `AbstractSkeleton.rideTick` and `Drowned.rideTick` take it
+    /// from a `PathfinderMob` they control; no other vehicle or rider does.
+    #[test]
+    fn only_horses_chickens_and_steering_skeletons_take_the_vehicles_body() {
+        let takes = |vehicle, rider, controlling| {
+            takes_vehicle_body(&of(1, vehicle), &of(2, rider), controlling)
+        };
+        for vehicle in [
+            Species::Horse,
+            Species::SkeletonHorse,
+            Species::Camel,
+            Species::Llama,
+            Species::Chicken,
+        ] {
+            assert!(takes(vehicle, Species::Zombie, false), "{vehicle:?}");
+        }
+        assert!(takes(Species::Spider, Species::Skeleton, true));
+        assert!(takes(Species::Spider, Species::Drowned, true));
+        assert!(!takes(Species::Spider, Species::Skeleton, false));
+        // Not a PathfinderMob.
+        assert!(!takes(Species::Ghast, Species::Skeleton, true));
+        // Their own BodyRotationControl turns these.
+        assert!(!takes(Species::Pig, Species::Zombie, true));
+        assert!(!takes(Species::Ravager, Species::Pillager, true));
+        assert!(!takes(Species::Hoglin, Species::Piglin, true));
+        assert!(!takes(Species::Strider, Species::ZombifiedPiglin, true));
+    }
+    /// `Mob.getControllingPassenger` (26.3 bytecode): the first passenger,
+    /// and only while no player is aboard, the vehicle has AI and the rider
+    /// can steer.
+    #[test]
+    fn a_skeleton_steers_its_spider_only_as_its_first_passenger() {
+        let mut spider = of(1, Species::Spider);
+        let skeleton = of(2, Species::Skeleton);
+        spider.extra.rider = Some(2);
+        assert!(controls_vehicle(&spider, &skeleton, false, false));
+        assert!(!controls_vehicle(&spider, &skeleton, true, false));
+        assert!(!controls_vehicle(&spider, &skeleton, false, true));
+        spider.extra.rider = Some(3);
+        assert!(!controls_vehicle(&spider, &skeleton, false, false));
+        spider.extra.rider = Some(2);
+        spider.no_ai = true;
+        assert!(!controls_vehicle(&spider, &skeleton, false, false));
+    }
+    /// `LivingEntityRenderer.extractRenderState` draws a rider of a living
+    /// vehicle from `solveBodyRot` (the vehicle's body, interpolated with
+    /// `rotLerp`), and anything else from its own body.
+    #[test]
+    fn a_rider_of_a_living_vehicle_is_drawn_from_the_vehicles_body() {
+        let mut m = of(2, Species::Pillager);
+        m.body_yaw = 0.0;
+        m.previous_body_yaw = 0.0;
+        m.head_yaw = 100.0;
+        m.previous_head_yaw = 100.0;
+        m.extra.mount = Some(7);
+        m.extra.vehicle_body = Some((7, 30.0, 50.0));
+        let close = |a: f32, b: f32| (a - b).abs() < 1e-4;
+        // Halfway, the vehicle's body is at 40: the head is 60 off, so the
+        // body is 85-clamped to 40 and turned a fifth of 60 toward the head.
+        assert!(close(super::super::anim::body_rot(&m, 0.5), 52.0));
+        assert!(close(super::super::anim::state(&m, 0.5).y_rot, 48.0));
+        // Off that vehicle (or onto a boat), its own body again.
+        m.extra.mount = Some(8);
+        assert!(close(super::super::anim::body_rot(&m, 0.5), 0.0));
+        m.extra.mount = None;
+        assert!(close(super::super::anim::body_rot(&m, 0.5), 0.0));
+    }
     fn npc(scale: f32) -> Mob {
         let mut kind = (*crate::mobs::sensor_scan_tests::kind()).clone();
         kind.id = "minecraft:player".into();
@@ -554,6 +722,35 @@ mod tests {
             1.312_500_059_604_645
         ));
     }
+    /// `Pig.getDefaultDimensions`: BABY_DIMENSIONS overrides PASSENGER.
+    #[test]
+    fn a_baby_pig_uses_its_own_passenger_attachment() {
+        let mut kind = (*crate::mobs::sensor_scan_tests::kind()).clone();
+        kind.id = "minecraft:pig".into();
+        kind.species = Species::Pig;
+        let kind = std::sync::Arc::new(kind);
+        let mut vehicle = Mob::new(1, kind.clone(), Vec3::new(4.5, 200.0, 4.5), 0.0);
+        let rider = Mob::new(2, kind, Vec3::ZERO, 0.0);
+        for (scale, baby_y, adult_y) in [
+            (0.0, 0.5, 0.868_749_976_158_142_1),
+            (1.0, 0.5, 0.868_749_976_158_142_1),
+            (2.0, 1.0, 1.737_499_952_316_284_2),
+        ] {
+            vehicle.extra.model_scale = scale;
+            for (age, expected) in [(-24000, baby_y), (-1, baby_y), (0, adult_y), (42, adult_y)] {
+                vehicle.extra.age = age;
+                let attachment = passenger_attachment(&vehicle);
+                assert_eq!(attachment, [0.0, expected, 0.0], "age={age}, scale={scale}");
+                let offset = vehicle_attachment(&rider, vehicle.width());
+                assert_eq!(offset, 0.0);
+                assert_eq!(
+                    seat(attachment, offset, vehicle.position, vehicle.yaw),
+                    Vec3::new(4.5, 200.0 + expected, 4.5)
+                );
+            }
+        }
+    }
+
     #[test]
     fn archers_keep_their_distance_and_brawlers_close_in() {
         assert!(ranged(Species::Skeleton) && ranged(Species::Pillager));
@@ -635,6 +832,33 @@ mod tests {
         ];
         assert!(start_riding(&mut others, 1, 2));
         assert_eq!(others[0].extra.variant3, 4);
+
+        // A camel takes riders while it carries at most two: the first stays
+        // extra.rider, and a fourth is refused.
+        let mut camel_ride = [
+            mob(1, "minecraft:husk", Species::Husk, 0),
+            mob(2, "minecraft:parched", Species::Parched, 0),
+            mob(3, "minecraft:zombie", Species::Zombie, 0),
+            mob(4, "minecraft:husk", Species::Husk, 0),
+            mob(10, "minecraft:camel_husk", Species::CamelHusk, 0),
+        ];
+        assert!(start_riding(&mut camel_ride, 1, 10), "first rider boards");
+        assert_eq!(camel_ride[4].extra.rider, Some(1), "first rider is driver");
+        assert!(start_riding(&mut camel_ride, 2, 10), "second rider boards");
+        assert_eq!(camel_ride[1].extra.mount, Some(10));
+        assert_eq!(camel_ride[4].extra.rider, Some(1), "driver stays");
+        assert!(start_riding(&mut camel_ride, 3, 10), "a third still fits");
+        assert!(!start_riding(&mut camel_ride, 4, 10), "a fourth is refused");
+        assert_eq!(camel_ride[3].extra.mount, None);
+
+        // Any other mob carries one.
+        let mut single = [
+            mob(1, "minecraft:zombie", Species::Zombie, 0),
+            mob(2, "minecraft:husk", Species::Husk, 0),
+            mob(10, "minecraft:chicken", Species::Chicken, 0),
+        ];
+        assert!(start_riding(&mut single, 1, 10));
+        assert!(!start_riding(&mut single, 2, 10));
     }
 }
 

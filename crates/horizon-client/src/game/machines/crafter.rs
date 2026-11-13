@@ -181,10 +181,17 @@ impl Game<'_> {
             return;
         }
         self.spawn_dispensed(pos, facing, rest, 6);
-        // CrafterRecipeCraftedTrigger for players within the 17-block box.
-        let near = self.eye_position().is_some_and(|e| {
+        // CrafterRecipeCraftedTrigger: every player whose box meets the 17-block
+        // box around the crafter's centre (8.5 from the centre to a face: the
+        // player's own width and height reach into it, not its eye point).
+        // `AABB.intersects` is strict: a box that only touches a face is out.
+        let near = self.player.as_ref().is_some_and(|p| {
             let c = center(pos);
-            (0..3).all(|i| (e[i] - c[i]).abs() <= 8.5 + 1.0)
+            let b = p.bounds();
+            let (lo, hi) = (b.min_position(), b.max_position());
+            (lo.x < c[0] + 8.5 && hi.x > c[0] - 8.5)
+                && (lo.y < c[1] + 8.5 && hi.y > c[1] - 8.5)
+                && (lo.z < c[2] + 8.5 && hi.z > c[2] - 8.5)
         });
         if near {
             let id = horizon_client::crafting::qualified(recipe);
@@ -372,6 +379,40 @@ mod tests {
         assert!(!c.disabled[0]);
         c.set_slot_state(4, true);
         assert_eq!(c.redstone_signal(), 1);
+    }
+    /// `CrafterBlockEntity.setSlotState`: a slot toggled in the menu lands on
+    /// the block entity itself, whose `setChanged` marks the chunk.
+    #[test]
+    #[ignore = "needs prepared resources in HORIZON_TEST_RESOURCES"]
+    fn a_slot_toggled_in_the_menu_lands_on_the_crafter() {
+        use crate::game::native_machines::tests::server_game;
+        let mut game = server_game();
+        let key = (2, 4, 3);
+        let state = game
+            .pack
+            .assets
+            .registry
+            .default_state("minecraft:crafter")
+            .unwrap();
+        game.world.set(key.0, key.1, key.2, state).unwrap();
+        let mut crafter = Crafter::default();
+        crafter.set_slot_state(3, false);
+        game.world
+            .block_entities
+            .put(key, BlockEntity::Crafter(crafter));
+        game.container = Some(key);
+        game.world.modified.clear();
+
+        game.crafter_slot_clicked(303, 0, horizon_client::menu::Input::Pickup);
+
+        let Some(BlockEntity::Crafter(c)) = game.world.block_entities.get(&key) else {
+            panic!("no crafter");
+        };
+        assert!(!c.disabled[3], "the click enabled the slot");
+        assert!(
+            game.world.modified.contains(&(0, 0)),
+            "the toggled slot left the chunk unmarked"
+        );
     }
     #[test]
     fn hoppers_fill_the_smaller_stacks_first() {

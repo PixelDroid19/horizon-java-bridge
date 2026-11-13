@@ -46,7 +46,7 @@ pub fn asset_url(name: &str) -> String {
     format!("https://github.com/{REPO}/releases/download/{TAG}/{name}")
 }
 
-/// The published build: its commit, the preparation format (`horizon_prepare::OUTPUT_VERSION`)
+/// The published build: its commit, the preparation format (`horizon_platform::prepare::OUTPUT_VERSION`)
 /// it was built with, and the launcher [`CONTRACT`] it was built for.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Deserialize)]
 pub struct Manifest {
